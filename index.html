@@ -39,8 +39,9 @@ select.fi{cursor:pointer;appearance:none}
 .lbtn{width:100%;padding:10px;background:linear-gradient(135deg,var(--blue),var(--violet));border:none;border-radius:var(--r);color:#fff;font-family:var(--f);font-size:15px;font-weight:600;cursor:pointer}
 .lbtn:hover{opacity:.88}
 .lerr{background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);color:var(--red);border-radius:8px;padding:8px 12px;font-size:12px;margin-top:8px}
-.lhint{margin-top:16px;padding:10px 12px;background:rgba(79,142,247,.07);border:1px solid rgba(79,142,247,.15);border-radius:8px;font-size:12px;color:var(--muted);line-height:1.7}
-.lhint strong{color:var(--blue)}
+.lforgot{margin-top:12px;text-align:center;font-size:12px;color:var(--muted)}
+.lforgot a{color:var(--blue);text-decoration:none;cursor:pointer}.lforgot a:hover{text-decoration:underline}
+.llock{margin-top:12px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--red);text-align:center;display:none}
 
 /* ── LANG TOGGLE ── */
 .lang-toggle{position:absolute;top:16px;right:16px;display:flex;align-items:center;gap:6px;background:var(--bg3);border:1px solid var(--b2);border-radius:20px;padding:4px}
@@ -154,8 +155,10 @@ tr:hover td{background:rgba(255,255,255,.01)}
     <div class="fg"><label class="fl" id="l-em-lbl">E-mail</label><input class="fi" id="l-e" type="email" placeholder="seu@empresa.com.br" autocomplete="username"></div>
     <div class="fg"><label class="fl" id="l-pw-lbl">Senha</label><input class="fi" id="l-p" type="password" placeholder="••••••••" autocomplete="current-password"></div>
     <button class="lbtn" onclick="doLogin()" id="l-btn">Entrar</button>
-    <div id="l-err" class="lerr hidden" id="l-err">E-mail ou senha incorretos.</div>
-    <div class="lhint"><strong>Admin:</strong> admin@empresa.com.br / admin123<br><strong>Gestor:</strong> gestor@empresa.com.br / gestor123</div>
+    <div id="l-err" class="lerr hidden">E-mail ou senha incorretos.</div>
+    <div id="l-lock" class="llock">🔒 Conta temporariamente bloqueada. Tente novamente em <span id="l-countdown">30</span>s.</div>
+    <div class="lforgot"><a onclick="toast('Entre em contato com o administrador do sistema.')">Esqueci minha senha</a></div>
+
   </div>
 </div>
 
@@ -585,9 +588,9 @@ function toast(msg,ms=3000){
 const DB_NAME='TravelIQ5',DB_VER=1;let db=null;
 const STORES={bookings:{kp:'_id'},flights:{kp:'_id'},hotels_cat:{kp:'_id'},sync_log:{kp:'_id',ai:true},app_users:{kp:'_id'}};
 const USERS_DEFAULT=[
-  {_id:'u1',name:'Administrador',email:'admin@empresa.com.br',pass:'admin123',role:'admin',active:true},
-  {_id:'u2',name:'Carlos Gestor',email:'gestor@empresa.com.br',pass:'gestor123',role:'gestor',active:true},
-  {_id:'u3',name:'Ana Analista',email:'analista@empresa.com.br',pass:'analista123',role:'analista',active:true},
+  {_id:'u1',name:'Administrador',email:'admin@empresa.com.br',passHash:'240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9',role:'admin',active:true},
+  {_id:'u2',name:'Carlos Gestor',email:'gestor@empresa.com.br',passHash:'18f2b94d784d03c222cb7c47148cdb8457f1ef3eaf3e317711f25d55747f6a35',role:'gestor',active:true},
+  {_id:'u3',name:'Ana Analista',email:'analista@empresa.com.br',passHash:'9cd268397030111adacb4268e51f0dbbb0dbc8c59eb34f8f7d55f72d4c888349',role:'analista',active:true},
 ];
 
 async function openDB(){
@@ -605,12 +608,34 @@ function dbCnt(s){return new Promise((r,j)=>{const q=txs(s).count();q.onsuccess=
 // ════════════════════════════════════════
 //  AUTH
 // ════════════════════════════════════════
+// ── Security: rate limiting ──
+let _loginAttempts=0, _lockUntil=0, _lockTimer=null;
+const MAX_ATTEMPTS=5, LOCK_SECS=30;
+
+async function hashPass(pass){
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(pass));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
 async function doLogin(){
+  const now=Date.now();
+  if(now<_lockUntil){return;}// still locked, ignore clicks
+
   const e=document.getElementById('l-e').value.trim().toLowerCase();
   const p=document.getElementById('l-p').value;
+  if(!e||!p){return;}
+
+  const btn=document.getElementById('l-btn');
+  btn.disabled=true;btn.style.opacity='.6';
+
+  const hashed=await hashPass(p);
   const users=await dbGA('app_users');
-  const u=users.find(u=>u.email===e&&u.pass===p&&u.active);
+  const u=users.find(u=>u.email===e&&(u.passHash===hashed||(u.pass&&u.pass===p))&&u.active);
+
+  btn.disabled=false;btn.style.opacity='';
+
   if(u){
+    _loginAttempts=0;
     currentUser=u;
     document.getElementById('login').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
@@ -620,7 +645,35 @@ async function doLogin(){
     document.getElementById('s-ro').textContent=t(roleKey)||u.role;
     buildNav();nav('dashboard');
   } else {
-    document.getElementById('l-err').classList.remove('hidden');
+    _loginAttempts++;
+    const errEl=document.getElementById('l-err');
+    const lockEl=document.getElementById('l-lock');
+    if(_loginAttempts>=MAX_ATTEMPTS){
+      _lockUntil=Date.now()+LOCK_SECS*1000;
+      errEl.classList.add('hidden');
+      lockEl.style.display='block';
+      document.getElementById('l-btn').disabled=true;
+      let rem=LOCK_SECS;
+      document.getElementById('l-countdown').textContent=rem;
+      _lockTimer=setInterval(()=>{
+        rem--;
+        document.getElementById('l-countdown').textContent=rem;
+        if(rem<=0){
+          clearInterval(_lockTimer);
+          _loginAttempts=0;
+          _lockUntil=0;
+          lockEl.style.display='none';
+          document.getElementById('l-btn').disabled=false;
+          document.getElementById('l-p').value='';
+        }
+      },1000);
+    } else {
+      errEl.classList.remove('hidden');
+      const left=MAX_ATTEMPTS-_loginAttempts;
+      errEl.textContent=LANG==='pt'
+        ?`Credenciais inválidas. ${left} tentativa${left>1?'s':''} restante${left>1?'s':''}.`
+        :`Invalid credentials. ${left} attempt${left>1?'s':''} remaining.`;
+    }
   }
 }
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&!document.getElementById('login').classList.contains('hidden'))doLogin()});
